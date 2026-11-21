@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>Edge Mapper — OpenStreetMap Sign-In</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      text-align: center;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 24px;
+      max-width: 440px;
+      width: 100%;
+    }
+    h1 { font-size: 18px; margin: 0 0 8px; color: #34d399; }
+    p { font-size: 14px; color: #cbd5e1; margin: 8px 0; }
+    code {
+      display: block;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px;
+      margin: 12px 0;
+      word-break: break-all;
+      font-size: 13px;
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="title">Connecting OpenStreetMap...</h1>
+    <p id="message">Returning authorization to Edge Mapper.</p>
+    <code id="codeBox" style="display:none"></code>
+  </div>
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code') || '';
+      const state = params.get('state') || '';
+      const error = params.get('error') || '';
+      const errorDesc = params.get('error_description') || '';
+
+      // Immediately scrub ?code=...&state=... from the address bar & history.
+      try {
+        window.history.replaceState(null, '', window.location.pathname);
+      } catch (_) {}
+
+      const titleEl = document.getElementById('title');
+      const msgEl = document.getElementById('message');
+
+      // Enforce CSRF state presence whenever an authorization code is returned.
+      if (code && !state) {
+        titleEl.textContent = 'Invalid Authorization Callback';
+        titleEl.style.color = '#f87171';
+        msgEl.textContent = 'Missing OAuth state parameter. Restart OpenStreetMap sign-in.';
+        return;
+      }
+
+      const payload = {
+        type: 'edge_mapper_osm_oauth',
+        code: code,
+        state: state,
+        error: error,
+        errorDescription: errorDesc,
+        ts: Date.now()
+      };
+
+      let delivered = false;
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(payload, window.location.origin);
+          delivered = true;
+        }
+      } catch (_) {}
+
+      // Only fall back to localStorage when window.opener postMessage delivery failed.
+      if (!delivered) {
+        try {
+          localStorage.setItem('edge_mapper_osm_oauth_result', JSON.stringify(payload));
+        } catch (_) {}
+      }
+
+      if (error) {
+        titleEl.textContent = 'Authorization Cancelled';
+        titleEl.style.color = '#f87171';
+        msgEl.textContent = errorDesc || error;
+      } else if (code) {
+        titleEl.textContent = 'OpenStreetMap Connected!';
+        msgEl.textContent = 'Sign-in complete! Returning to Edge Mapper...';
+        setTimeout(() => { try { window.close(); } catch (_) {} }, 500);
+      } else {
+        titleEl.textContent = 'Missing Authorization Code';
+        titleEl.style.color = '#fbbf24';
+        msgEl.textContent = 'No code parameter was returned by OpenStreetMap.';
+      }
+    })();
+  </script>
+</body>
+</html>

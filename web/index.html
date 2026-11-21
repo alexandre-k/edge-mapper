@@ -1,0 +1,1464 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="Edge Mapper — OpenStreetMap field mapping with on-device Gemini Nano 4 & Firebase AI.">
+  <meta name="theme-color" content="#059669">
+
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Edge Mapper">
+  <link rel="apple-mobile-web-app-icon" href="icons/Icon-192.png">
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Edge Mapper</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Chrome Built-in AI (Gemini Nano 4) on-device bridge for Linux / Desktop Web -->
+  <script>
+    (function () {
+      let activeAbortController = null;
+      let currentProgressText = '';
+
+      function setProgress(msg) {
+        currentProgressText = msg || '';
+        if (typeof window.edgeMapperNanoOnProgress === 'function') {
+          try { window.edgeMapperNanoOnProgress(currentProgressText); } catch (_) {}
+        }
+      }
+
+      function getLanguageModelApi() {
+        if (typeof globalThis.LanguageModel !== 'undefined') {
+          return globalThis.LanguageModel;
+        }
+        if (typeof globalThis.ai !== 'undefined' && globalThis.ai.languageModel) {
+          return globalThis.ai.languageModel;
+        }
+        return null;
+      }
+
+      function base64ToBlob(base64, mimeType) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mimeType || 'image/jpeg' });
+      }
+
+      async function downscaleBlobForNano(blob, maxDim) {
+        try {
+          const bitmap = await createImageBitmap(blob);
+          const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+          if (scale >= 0.99) {
+            bitmap.close();
+            return blob;
+          }
+          const w = Math.max(1, Math.round(bitmap.width * scale));
+          const h = Math.max(1, Math.round(bitmap.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(bitmap, 0, 0, w, h);
+          bitmap.close();
+          const resized = await new Promise((resolve) =>
+            canvas.toBlob((b) => resolve(b || blob), 'image/jpeg', 0.82)
+          );
+          return resized;
+        } catch (_) {
+          return blob;
+        }
+      }
+
+      function withTimeout(promise, ms, label, abortCtrl) {
+        let timer = null;
+        return Promise.race([
+          promise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              try { if (abortCtrl) abortCtrl.abort(); } catch (_) {}
+              reject(new Error(label + ' timed out after ' + Math.round(ms / 1000) + 's'));
+            }, ms);
+          })
+        ]).finally(() => {
+          if (timer) clearTimeout(timer);
+        });
+      }
+
+      window.edgeMapperNano = {
+        getProgress() {
+          return currentProgressText;
+        },
+
+        cancelActive() {
+          if (activeAbortController) {
+            try { activeAbortController.abort(); } catch (_) {}
+            activeAbortController = null;
+          }
+          setProgress('Cancelled');
+        },
+
+        async checkAvailability() {
+          try {
+            const api = getLanguageModelApi();
+            if (!api) {
+              return JSON.stringify({
+                available: false,
+                multimodal: false,
+                status: 'unavailable',
+                modelName: 'Gemini Nano 4',
+                reason: 'Chrome Built-in AI not enabled. Enable #prompt-api-for-gemini-nano-multimodal-input in chrome://flags.'
+              });
+            }
+
+            let status = 'unavailable';
+            let multimodal = false;
+
+            if (typeof api.availability === 'function') {
+              try {
+                const mmStatus = await api.availability({
+                  expectedInputs: [{ type: 'text' }, { type: 'image' }],
+                  expectedOutputs: [{ type: 'text', languages: ['en'] }]
+                });
+                if (mmStatus && mmStatus !== 'unavailable') {
+                  status = mmStatus;
+                  multimodal = true;
+                }
+              } catch (_) {}
+
+              if (status === 'unavailable') {
+                try {
+                  status = await api.availability({
+                    expectedInputs: [{ type: 'text' }],
+                    expectedOutputs: [{ type: 'text', languages: ['en'] }]
+                  });
+                } catch (_) {
+                  status = await api.availability();
+                }
+              }
+            } else if (typeof api.capabilities === 'function') {
+              const caps = await api.capabilities();
+              status = caps && caps.available ? caps.available : 'unavailable';
+            }
+
+            const usable = status === 'available' || status === 'readily' ||
+                           status === 'downloadable' || status === 'after-download' ||
+                           status === 'downloading';
+
+            return JSON.stringify({
+              available: usable,
+              multimodal: multimodal,
+              status: status,
+              modelName: 'Gemini Nano 4',
+              reason: usable
+                ? (status === 'downloadable' || status === 'after-download' || status === 'downloading'
+                    ? 'Gemini Nano 4 downloading/ready to download.'
+                    : (multimodal
+                        ? 'Gemini Nano 4 (multimodal) ready on-device.'
+                        : 'Gemini Nano 4 (text) ready on-device.'))
+                : 'Gemini Nano 4 unavailable (' + status + '). Using Firebase AI fallback.'
+            });
+          } catch (e) {
+            return JSON.stringify({
+              available: false,
+              multimodal: false,
+              status: 'error',
+              modelName: 'Gemini Nano 4',
+              reason: 'Gemini Nano check failed: ' + String(e)
+            });
+          }
+        },
+
+        async testNano() {
+          const started = Date.now();
+          const api = getLanguageModelApi();
+          if (!api) {
+            return JSON.stringify({
+              ok: false,
+              error: 'Chrome Built-in AI API (LanguageModel) not found. Enable #prompt-api-for-gemini-nano-multimodal-input in chrome://flags and restart Chrome.'
+            });
+          }
+
+          let availability = 'unknown';
+          let multimodal = false;
+          try {
+            if (typeof api.availability === 'function') {
+              try {
+                const mm = await api.availability({
+                  expectedInputs: [{ type: 'text' }, { type: 'image' }]
+                });
+                if (mm && mm !== 'unavailable') {
+                  availability = mm;
+                  multimodal = true;
+                }
+              } catch (_) {}
+              if (availability === 'unknown' || availability === 'unavailable') {
+                availability = await api.availability();
+              }
+            }
+          } catch (e) {
+            return JSON.stringify({
+              ok: false,
+              error: 'availability() failed: ' + String(e)
+            });
+          }
+
+          if (availability === 'unavailable') {
+            return JSON.stringify({
+              ok: false,
+              error: 'Gemini Nano 4 status is "unavailable". Check chrome://on-device-internals and chrome://flags (#optimization-guide-on-device-model).'
+            });
+          }
+
+          let session = null;
+          try {
+            const abortCtrl = new AbortController();
+            const monitorFn = (m) => {
+              if (!m || typeof m.addEventListener !== 'function') return;
+              m.addEventListener('downloadprogress', (e) => {
+                const pct = typeof e.loaded === 'number' ? Math.round(e.loaded * 100) : null;
+                setProgress(pct !== null ? 'Downloading Nano 4 (' + pct + '%)...' : 'Downloading Nano 4...');
+              });
+            };
+            session = await withTimeout(
+              api.create({
+                expectedInputs: multimodal
+                  ? [{ type: 'text' }, { type: 'image' }]
+                  : [{ type: 'text' }],
+                expectedOutputs: [{ type: 'text', languages: ['en'] }],
+                monitor: monitorFn,
+                signal: abortCtrl.signal
+              }),
+              30000,
+              'Nano 4 init',
+              abortCtrl
+            );
+            const reply = await withTimeout(
+              session.prompt('Reply with OK', { signal: abortCtrl.signal }),
+              20000,
+              'Nano 4 prompt',
+              abortCtrl
+            );
+            const ms = Date.now() - started;
+            return JSON.stringify({
+              ok: true,
+              status: availability,
+              multimodal: multimodal,
+              elapsedMs: ms,
+              reply: String(reply || 'OK').trim()
+            });
+          } catch (e) {
+            return JSON.stringify({
+              ok: false,
+              status: availability,
+              multimodal: multimodal,
+              error: 'Nano 4 error (status=' + availability + '): ' + String(e)
+            });
+          } finally {
+            if (session && typeof session.destroy === 'function') {
+              try { session.destroy(); } catch (_) {}
+            }
+          }
+        },
+
+        async generateOsmDraft(promptText, imageBase64, mimeType) {
+          const api = getLanguageModelApi();
+          if (!api) {
+            throw new Error('Chrome Built-in AI (Gemini Nano 4) is not available.');
+          }
+
+          if (activeAbortController) {
+            try { activeAbortController.abort(); } catch (_) {}
+          }
+          const abortCtrl = new AbortController();
+          activeAbortController = abortCtrl;
+
+          const hasImage = Boolean(imageBase64 && imageBase64.length > 0);
+          let session = null;
+          let usedMultimodal = false;
+
+          const systemInstruction =
+            'You are an OpenStreetMap cartographer. Reply ONLY with a single JSON object (no markdown) with keys: ' +
+            'summary (string), fieldNotes (string), detectedLanguage (ISO 639-1 string), ' +
+            'osmType ("node"|"way"|"area"), estimatedOffsetMeters (number 1-120), distanceReasoning (string), ' +
+            'tags (array of {"key":"...","value":"..."}), ' +
+            'tagCandidates (array of {"key":"...","value":"...","probability":0.8}).';
+
+          const osmResponseSchema = {
+            type: 'object',
+            properties: {
+              summary: { type: 'string' },
+              fieldNotes: { type: 'string' },
+              detectedLanguage: { type: 'string' },
+              osmType: { type: 'string', enum: ['node', 'way', 'area'] },
+              estimatedOffsetMeters: { type: 'number' },
+              distanceReasoning: { type: 'string' },
+              tags: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    key: { type: 'string' },
+                    value: { type: 'string' }
+                  },
+                  required: ['key', 'value']
+                }
+              },
+              tagCandidates: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    key: { type: 'string' },
+                    value: { type: 'string' },
+                    probability: { type: 'number' }
+                  },
+                  required: ['key', 'value', 'probability']
+                }
+              }
+            },
+            required: ['summary', 'detectedLanguage', 'osmType', 'estimatedOffsetMeters', 'tags']
+          };
+
+          const monitorFn = (m) => {
+            if (!m || typeof m.addEventListener !== 'function') return;
+            m.addEventListener('downloadprogress', (e) => {
+              const pct = typeof e.loaded === 'number'
+                ? Math.round(e.loaded * 100)
+                : null;
+              setProgress(
+                pct !== null
+                  ? 'Downloading Nano 4 (' + pct + '%)...'
+                  : 'Downloading Nano 4...'
+              );
+            });
+          };
+
+          try {
+            setProgress('Starting Nano 4...');
+
+            if (hasImage) {
+              try {
+                session = await withTimeout(
+                  api.create({
+                    expectedInputs: [{ type: 'text' }, { type: 'image' }],
+                    expectedOutputs: [{ type: 'text', languages: ['en'] }],
+                    initialPrompts: [{ role: 'system', content: systemInstruction }],
+                    monitor: monitorFn,
+                    signal: abortCtrl.signal
+                  }),
+                  30000,
+                  'Nano 4 session',
+                  abortCtrl
+                );
+                usedMultimodal = true;
+              } catch (mmErr) {
+                if (abortCtrl.signal.aborted) throw mmErr;
+                session = null;
+              }
+            }
+
+            if (!session) {
+              setProgress('Starting Nano 4 (text)...');
+              session = await withTimeout(
+                api.create({
+                  expectedInputs: [{ type: 'text' }],
+                  expectedOutputs: [{ type: 'text', languages: ['en'] }],
+                  initialPrompts: [{ role: 'system', content: systemInstruction }],
+                  monitor: monitorFn,
+                  signal: abortCtrl.signal
+                }),
+                30000,
+                'Nano 4 session',
+                abortCtrl
+              );
+            }
+
+            async function runPromptWithConstraint(inputPayload, timeoutMs, label) {
+              try {
+                return await withTimeout(
+                  session.prompt(inputPayload, {
+                    responseConstraint: osmResponseSchema,
+                    signal: abortCtrl.signal
+                  }),
+                  timeoutMs,
+                  label,
+                  abortCtrl
+                );
+              } catch (constraintErr) {
+                if (abortCtrl.signal.aborted) throw constraintErr;
+                // Fallback if this Chrome build does not support responseConstraint with multimodal inputs
+                return await withTimeout(
+                  session.prompt(inputPayload, { signal: abortCtrl.signal }),
+                  timeoutMs,
+                  label,
+                  abortCtrl
+                );
+              }
+            }
+
+            let rawText = '';
+            if (usedMultimodal && hasImage) {
+              setProgress('Preparing photo for Nano 4...');
+              const rawBlob = base64ToBlob(imageBase64, mimeType || 'image/jpeg');
+              const fastBlob = await downscaleBlobForNano(rawBlob, 512);
+              setProgress('Analyzing photo with Nano 4...');
+              rawText = await runPromptWithConstraint(
+                [
+                  {
+                    role: 'user',
+                    content: [
+                      { type: 'text', value: promptText },
+                      { type: 'image', value: fastBlob }
+                    ]
+                  }
+                ],
+                65000,
+                'Nano 4 image analysis'
+              );
+            } else {
+              setProgress('Analyzing with Nano 4...');
+              rawText = await runPromptWithConstraint(
+                promptText,
+                35000,
+                'Nano 4 analysis'
+              );
+            }
+
+            setProgress('');
+            return JSON.stringify({
+              supported: true,
+              multimodal: usedMultimodal,
+              json: String(rawText || '')
+            });
+          } catch (e) {
+            setProgress('');
+            return JSON.stringify({
+              supported: false,
+              multimodal: usedMultimodal,
+              error: String(e)
+            });
+          } finally {
+            if (activeAbortController === abortCtrl) {
+              activeAbortController = null;
+            }
+            if (session && typeof session.destroy === 'function') {
+              try { session.destroy(); } catch (_) {}
+            }
+          }
+        }
+      };
+
+      // Photo JPEG compression helper for Firebase cross-device sync on Web
+      window.edgeMapperPhoto = {
+        async compressDataUri(dataUri, maxRawBytes) {
+          try {
+            if (!dataUri || !(
+              dataUri.startsWith('data:image/jpeg') ||
+              dataUri.startsWith('data:image/png') ||
+              dataUri.startsWith('data:image/webp')
+            )) return '';
+            const maxB64Len = Math.floor((maxRawBytes || (420 * 1024)) * 4 / 3) + 64;
+            if (dataUri.length <= maxB64Len && dataUri.startsWith('data:image/jpeg')) {
+              return dataUri;
+            }
+            const res = await fetch(dataUri);
+            const blob = await res.blob();
+            const bitmap = await createImageBitmap(blob);
+            const presets = [
+              [1280, 0.80],
+              [1024, 0.74],
+              [840, 0.68],
+              [640, 0.60],
+              [480, 0.52],
+              [360, 0.45]
+            ];
+            let best = '';
+            try {
+              for (const [maxDim, quality] of presets) {
+                const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+                const w = Math.max(1, Math.round(bitmap.width * scale));
+                const h = Math.max(1, Math.round(bitmap.height * scale));
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(bitmap, 0, 0, w, h);
+                const candidate = canvas.toDataURL('image/jpeg', quality);
+                best = candidate;
+                if (candidate.length <= maxB64Len) {
+                  return candidate;
+                }
+              }
+            } finally {
+              bitmap.close();
+            }
+            return best;
+          } catch (_) {
+            return '';
+          }
+        }
+      };
+
+      // High-capacity IndexedDB key-value store for Web records/photos (avoids 5MB localStorage cap)
+      window.edgeMapperIdb = (function () {
+        const DB_NAME = 'edge_mapper_storage_v1';
+        const STORE_NAME = 'kv';
+        let dbPromise = null;
+
+        function openDb() {
+          if (dbPromise) return dbPromise;
+          dbPromise = new Promise((resolve, reject) => {
+            try {
+              const req = indexedDB.open(DB_NAME, 1);
+              req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                  db.createObjectStore(STORE_NAME);
+                }
+              };
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error);
+            } catch (e) {
+              reject(e);
+            }
+          });
+          return dbPromise;
+        }
+
+        return {
+          async get(key) {
+            try {
+              const db = await openDb();
+              return await new Promise((resolve) => {
+                const tx = db.transaction(STORE_NAME, 'readonly');
+                const req = tx.objectStore(STORE_NAME).get(key);
+                req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : '');
+                req.onerror = () => resolve('');
+              });
+            } catch (_) {
+              return '';
+            }
+          },
+          async set(key, value) {
+            try {
+              const db = await openDb();
+              return await new Promise((resolve) => {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                tx.objectStore(STORE_NAME).put(value, key);
+                tx.oncomplete = () => resolve(true);
+                tx.onerror = () => resolve(false);
+              });
+            } catch (_) {
+              return false;
+            }
+          }
+        };
+      })();
+
+      // Encrypted Secrets Vault for Web:
+      // 1. Default: Non-extractable WebCrypto AES-256-GCM CryptoKey stored in IndexedDB
+      // 2. Passkey Lock: W3C WebAuthn PRF (CTAP2 hmac-secret) compatible with Bitwarden,
+      //    YubiKey 5 (USB/NFC), and OS Passkeys -> HKDF-SHA-256 -> AES-256-GCM
+      // 3. Passphrase Lock: PBKDF2-SHA-256 (600,000 iterations) -> AES-256-GCM (Bitwarden-managed)
+      window.edgeMapperVault = (function () {
+        const VAULT_ENVELOPE_KEY = 'edge_mapper_encrypted_vault_v1';
+        const KEY_DB_NAME = 'edge_mapper_vault_keys_v1';
+        const KEY_STORE = 'keys';
+        const DEVICE_KEY_ID = 'device_aes256_gcm_v1';
+
+        let activeCryptoKey = null;
+        let cachedSecrets = null;
+        let keyDbPromise = null;
+
+        function openKeyDb() {
+          if (keyDbPromise) return keyDbPromise;
+          keyDbPromise = new Promise((resolve, reject) => {
+            try {
+              const req = indexedDB.open(KEY_DB_NAME, 1);
+              req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(KEY_STORE)) {
+                  db.createObjectStore(KEY_STORE);
+                }
+              };
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error);
+            } catch (e) {
+              reject(e);
+            }
+          });
+          return keyDbPromise;
+        }
+
+        function bytesToB64(bytes) {
+          let bin = '';
+          const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+          return btoa(bin);
+        }
+
+        function b64ToBytes(b64) {
+          const bin = atob(b64);
+          const out = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+          return out;
+        }
+
+        function readEnvelope() {
+          try {
+            const raw = window.localStorage.getItem(VAULT_ENVELOPE_KEY);
+            if (!raw) return null;
+            return JSON.parse(raw);
+          } catch (_) {
+            return null;
+          }
+        }
+
+        function writeEnvelope(env) {
+          window.localStorage.setItem(VAULT_ENVELOPE_KEY, JSON.stringify(env));
+        }
+
+        async function getOrCreateDeviceKey() {
+          const db = await openKeyDb();
+          const existing = await new Promise((resolve) => {
+            const tx = db.transaction(KEY_STORE, 'readonly');
+            const req = tx.objectStore(KEY_STORE).get(DEVICE_KEY_ID);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => resolve(null);
+          });
+          if (existing) return existing;
+
+          const key = await crypto.subtle.generateKey(
+            { name: 'AES-GCM', length: 256 },
+            false, // non-extractable!
+            ['encrypt', 'decrypt']
+          );
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction(KEY_STORE, 'readwrite');
+            tx.objectStore(KEY_STORE).put(key, DEVICE_KEY_ID);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => reject(tx.error);
+          });
+          return key;
+        }
+
+        async function deleteDeviceKey() {
+          try {
+            const db = await openKeyDb();
+            await new Promise((resolve) => {
+              const tx = db.transaction(KEY_STORE, 'readwrite');
+              tx.objectStore(KEY_STORE).delete(DEVICE_KEY_ID);
+              tx.oncomplete = () => resolve(true);
+              tx.onerror = () => resolve(false);
+            });
+          } catch (_) {}
+        }
+
+        async function deriveKeyFromPrfOutput(prfBytes, saltBytes) {
+          const baseKey = await crypto.subtle.importKey(
+            'raw',
+            prfBytes,
+            'HKDF',
+            false,
+            ['deriveKey']
+          );
+          return crypto.subtle.deriveKey(
+            {
+              name: 'HKDF',
+              hash: 'SHA-256',
+              salt: saltBytes,
+              info: new TextEncoder().encode('edge-mapper-secrets-vault-v1')
+            },
+            baseKey,
+            { name: 'AES-GCM', length: 256 },
+            false,
+            ['encrypt', 'decrypt']
+          );
+        }
+
+        async function deriveKeyFromPassphrase(passphrase, saltBytes) {
+          const baseKey = await crypto.subtle.importKey(
+            'raw',
+            new TextEncoder().encode(passphrase),
+            'PBKDF2',
+            false,
+            ['deriveKey']
+          );
+          return crypto.subtle.deriveKey(
+            {
+              name: 'PBKDF2',
+              hash: 'SHA-256',
+              salt: saltBytes,
+              iterations: 600000
+            },
+            baseKey,
+            { name: 'AES-GCM', length: 256 },
+            false,
+            ['encrypt', 'decrypt']
+          );
+        }
+
+        async function encryptJson(cryptoKey, obj) {
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const plain = new TextEncoder().encode(JSON.stringify(obj || {}));
+          const cipherBuf = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv },
+            cryptoKey,
+            plain
+          );
+          return {
+            ivB64: bytesToB64(iv),
+            ciphertextB64: bytesToB64(new Uint8Array(cipherBuf))
+          };
+        }
+
+        async function decryptJson(cryptoKey, ivB64, ciphertextB64) {
+          const iv = b64ToBytes(ivB64);
+          const cipher = b64ToBytes(ciphertextB64);
+          const plainBuf = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv },
+            cryptoKey,
+            cipher
+          );
+          return JSON.parse(new TextDecoder().decode(plainBuf));
+        }
+
+        function supportsWebAuthn() {
+          return typeof window.PublicKeyCredential !== 'undefined' &&
+                 typeof navigator.credentials !== 'undefined' &&
+                 typeof crypto !== 'undefined' &&
+                 typeof crypto.subtle !== 'undefined' &&
+                 window.isSecureContext;
+        }
+
+        async function ensureUnlockedIfOsKeystore() {
+          const env = readEnvelope();
+          if (env && (env.mode === 'passkey_prf' || env.mode === 'passphrase')) {
+            return activeCryptoKey !== null;
+          }
+          if (!activeCryptoKey) {
+            activeCryptoKey = await getOrCreateDeviceKey();
+          }
+          if (cachedSecrets === null) {
+            if (env && env.mode === 'os_keystore' && env.ivB64 && env.ciphertextB64) {
+              try {
+                cachedSecrets = await decryptJson(activeCryptoKey, env.ivB64, env.ciphertextB64);
+              } catch (_) {
+                // Fail closed rather than silently resetting stored secrets to {}
+                activeCryptoKey = null;
+                return false;
+              }
+            } else {
+              cachedSecrets = {};
+            }
+          }
+          return true;
+        }
+
+        return {
+          async getStatus() {
+            const env = readEnvelope();
+            const mode = env && env.mode ? env.mode : 'os_keystore';
+            const locked = (mode === 'passkey_prf' || mode === 'passphrase') && activeCryptoKey === null;
+            return JSON.stringify({
+              mode,
+              isLocked: locked,
+              hasStoredSecrets: !!(env && env.ciphertextB64),
+              supportsPasskeyPrf: supportsWebAuthn(),
+              supportsOsBiometric: false,
+              credentialLabel: (env && env.label) ? env.label : '',
+              detail: mode === 'passkey_prf'
+                ? 'AES-256-GCM encrypted with WebAuthn Passkey PRF (Bitwarden / YubiKey / OS Passkey)'
+                : (mode === 'passphrase'
+                    ? 'AES-256-GCM encrypted with PBKDF2-SHA-256 (600k iterations) passphrase'
+                    : 'AES-256-GCM encrypted with non-extractable browser WebCrypto key (IndexedDB)')
+            });
+          },
+
+          async readAllSecrets() {
+            const ok = await ensureUnlockedIfOsKeystore();
+            if (!ok) {
+              return JSON.stringify({ locked: true, secrets: {} });
+            }
+            return JSON.stringify({ locked: false, secrets: cachedSecrets || {} });
+          },
+
+          async writeSecrets(secretsJson) {
+            const ok = await ensureUnlockedIfOsKeystore();
+            if (!ok || !activeCryptoKey) {
+              throw new Error('Vault is locked — unlock with your Passkey or passphrase first.');
+            }
+            const nextSecrets = JSON.parse(secretsJson || '{}');
+            const prev = readEnvelope() || { v: 1, mode: 'os_keystore' };
+            const enc = await encryptJson(activeCryptoKey, nextSecrets);
+            writeEnvelope({
+              ...prev,
+              v: 1,
+              mode: prev.mode || 'os_keystore',
+              ivB64: enc.ivB64,
+              ciphertextB64: enc.ciphertextB64
+            });
+            cachedSecrets = nextSecrets;
+            return true;
+          },
+
+          async enrollPasskey(label) {
+            if (!supportsWebAuthn()) {
+              throw new Error('WebAuthn Passkeys require HTTPS (e.g. https://localhost:8443) and a modern browser.');
+            }
+            // Refuse mode transition while locked so existing secrets are never wiped.
+            const prevEnv = readEnvelope();
+            if (prevEnv && (prevEnv.mode === 'passkey_prf' || prevEnv.mode === 'passphrase') && activeCryptoKey === null) {
+              throw new Error('Unlock the vault before changing protection mode.');
+            }
+            let existingSecrets = cachedSecrets;
+            if (existingSecrets === null) {
+              if (!prevEnv || prevEnv.mode === 'os_keystore') {
+                const ok = await ensureUnlockedIfOsKeystore();
+                if (!ok) throw new Error('Unable to unlock existing vault secrets.');
+                existingSecrets = cachedSecrets || {};
+              } else {
+                throw new Error('Unlock the vault before changing protection mode.');
+              }
+            }
+
+            const salt = crypto.getRandomValues(new Uint8Array(32));
+            const hkdfSalt = crypto.getRandomValues(new Uint8Array(32));
+            const userId = crypto.getRandomValues(new Uint8Array(16));
+            const challenge = crypto.getRandomValues(new Uint8Array(32));
+            const rpId = window.location.hostname;
+
+            const cred = await navigator.credentials.create({
+              publicKey: {
+                challenge,
+                rp: { name: 'Edge Mapper Vault', id: rpId },
+                user: {
+                  id: userId,
+                  name: label || 'edge-mapper-vault',
+                  displayName: label || 'Edge Mapper Encrypted Vault'
+                },
+                pubKeyCredParams: [
+                  { type: 'public-key', alg: -7 },   // ES256
+                  { type: 'public-key', alg: -257 }  // RS256
+                ],
+                authenticatorSelection: {
+                  residentKey: 'preferred',
+                  userVerification: 'required'
+                },
+                timeout: 90000,
+                extensions: {
+                  prf: {
+                    eval: { first: salt }
+                  }
+                }
+              }
+            });
+
+            if (!cred) {
+              throw new Error('Passkey creation was cancelled.');
+            }
+
+            const credIdBytes = new Uint8Array(cred.rawId);
+            const extResults = typeof cred.getClientExtensionResults === 'function'
+              ? (cred.getClientExtensionResults() || {})
+              : {};
+            const prfExt = extResults.prf || {};
+            if (prfExt.enabled === false) {
+              throw new Error('This authenticator did not report WebAuthn PRF support. Try a YubiKey 5, Bitwarden Passkey, or use Vault Passphrase Lock.');
+            }
+
+            let prfFirst = prfExt.results && prfExt.results.first
+              ? new Uint8Array(prfExt.results.first)
+              : null;
+
+            // Many authenticators (including YubiKey 5 & Bitwarden) return PRF output
+            // on assertion (`credentials.get`) rather than creation — run one verification touch!
+            if (!prfFirst) {
+              const assertion = await navigator.credentials.get({
+                publicKey: {
+                  challenge: crypto.getRandomValues(new Uint8Array(32)),
+                  rpId,
+                  allowCredentials: [{ type: 'public-key', id: credIdBytes }],
+                  userVerification: 'required',
+                  timeout: 90000,
+                  extensions: {
+                    prf: {
+                      eval: { first: salt }
+                    }
+                  }
+                }
+              });
+              const getExt = assertion && typeof assertion.getClientExtensionResults === 'function'
+                ? (assertion.getClientExtensionResults() || {})
+                : {};
+              if (getExt.prf && getExt.prf.results && getExt.prf.results.first) {
+                prfFirst = new Uint8Array(getExt.prf.results.first);
+              }
+            }
+
+            if (!prfFirst || prfFirst.length < 16) {
+              throw new Error('Passkey did not return a PRF encryption secret (CTAP2 hmac-secret required for Bitwarden / YubiKey encryption). You can use Passphrase Lock instead.');
+            }
+
+            let derivedKey;
+            try {
+              derivedKey = await deriveKeyFromPrfOutput(prfFirst, hkdfSalt);
+            } finally {
+              prfFirst.fill(0);
+            }
+            const enc = await encryptJson(derivedKey, existingSecrets);
+            writeEnvelope({
+              v: 1,
+              mode: 'passkey_prf',
+              credentialIdB64: bytesToB64(credIdBytes),
+              rpId,
+              label: label || 'Passkey (Bitwarden / YubiKey)',
+              saltB64: bytesToB64(salt),
+              hkdfSaltB64: bytesToB64(hkdfSalt),
+              ivB64: enc.ivB64,
+              ciphertextB64: enc.ciphertextB64
+            });
+            activeCryptoKey = derivedKey;
+            cachedSecrets = existingSecrets;
+            await deleteDeviceKey();
+            return true;
+          },
+
+          async unlockWithPasskey() {
+            const env = readEnvelope();
+            if (!env || env.mode !== 'passkey_prf' || !env.credentialIdB64 || !env.saltB64) {
+              throw new Error('No Passkey-encrypted vault configured.');
+            }
+            if (!supportsWebAuthn()) {
+              throw new Error('WebAuthn Passkeys are unavailable in this context.');
+            }
+            const credIdBytes = b64ToBytes(env.credentialIdB64);
+            const saltBytes = b64ToBytes(env.saltB64);
+            const hkdfSaltBytes = env.hkdfSaltB64 ? b64ToBytes(env.hkdfSaltB64) : saltBytes;
+            const assertion = await navigator.credentials.get({
+              publicKey: {
+                challenge: crypto.getRandomValues(new Uint8Array(32)),
+                rpId: env.rpId || window.location.hostname,
+                allowCredentials: [{ type: 'public-key', id: credIdBytes }],
+                userVerification: 'required',
+                timeout: 90000,
+                extensions: {
+                  prf: {
+                    eval: { first: saltBytes }
+                  }
+                }
+              }
+            });
+            const ext = assertion && typeof assertion.getClientExtensionResults === 'function'
+              ? (assertion.getClientExtensionResults() || {})
+              : {};
+            const prfFirst = ext.prf && ext.prf.results && ext.prf.results.first
+              ? new Uint8Array(ext.prf.results.first)
+              : null;
+            if (!prfFirst) {
+              throw new Error('Passkey did not return PRF secret to decrypt vault.');
+            }
+            let derivedKey;
+            try {
+              derivedKey = await deriveKeyFromPrfOutput(prfFirst, hkdfSaltBytes);
+            } finally {
+              prfFirst.fill(0);
+            }
+            const secrets = await decryptJson(derivedKey, env.ivB64, env.ciphertextB64);
+            activeCryptoKey = derivedKey;
+            cachedSecrets = secrets;
+            return JSON.stringify(secrets);
+          },
+
+          async enablePassphrase(passphrase) {
+            if (!passphrase || passphrase.length < 12) {
+              throw new Error('Passphrase must be at least 12 characters.');
+            }
+            const prevEnv = readEnvelope();
+            if (prevEnv && (prevEnv.mode === 'passkey_prf' || prevEnv.mode === 'passphrase') && activeCryptoKey === null) {
+              throw new Error('Unlock the vault before changing protection mode.');
+            }
+            let existingSecrets = cachedSecrets;
+            if (existingSecrets === null) {
+              if (!prevEnv || prevEnv.mode === 'os_keystore') {
+                const ok = await ensureUnlockedIfOsKeystore();
+                if (!ok) throw new Error('Unable to unlock existing vault secrets.');
+                existingSecrets = cachedSecrets || {};
+              } else {
+                throw new Error('Unlock the vault before changing protection mode.');
+              }
+            }
+            const salt = crypto.getRandomValues(new Uint8Array(32));
+            const derivedKey = await deriveKeyFromPassphrase(passphrase, salt);
+            const enc = await encryptJson(derivedKey, existingSecrets);
+            writeEnvelope({
+              v: 1,
+              mode: 'passphrase',
+              label: 'Passphrase (Bitwarden-compatible)',
+              saltB64: bytesToB64(salt),
+              ivB64: enc.ivB64,
+              ciphertextB64: enc.ciphertextB64
+            });
+            activeCryptoKey = derivedKey;
+            cachedSecrets = existingSecrets;
+            await deleteDeviceKey();
+            return true;
+          },
+
+          async unlockWithPassphrase(passphrase) {
+            const env = readEnvelope();
+            if (!env || env.mode !== 'passphrase' || !env.saltB64) {
+              throw new Error('No passphrase-encrypted vault configured.');
+            }
+            const saltBytes = b64ToBytes(env.saltB64);
+            const derivedKey = await deriveKeyFromPassphrase(passphrase, saltBytes);
+            try {
+              const secrets = await decryptJson(derivedKey, env.ivB64, env.ciphertextB64);
+              activeCryptoKey = derivedKey;
+              cachedSecrets = secrets;
+              return JSON.stringify(secrets);
+            } catch (_) {
+              throw new Error('Incorrect vault passphrase.');
+            }
+          },
+
+          async switchToOsKeystore() {
+            if (cachedSecrets === null) {
+              const ok = await ensureUnlockedIfOsKeystore();
+              if (!ok) throw new Error('Unlock the vault before switching protection mode.');
+            }
+            const secrets = cachedSecrets || {};
+            const deviceKey = await getOrCreateDeviceKey();
+            const enc = await encryptJson(deviceKey, secrets);
+            writeEnvelope({
+              v: 1,
+              mode: 'os_keystore',
+              ivB64: enc.ivB64,
+              ciphertextB64: enc.ciphertextB64
+            });
+            activeCryptoKey = deviceKey;
+            cachedSecrets = secrets;
+            return true;
+          },
+
+          async lock() {
+            activeCryptoKey = null;
+            cachedSecrets = null;
+            return true;
+          }
+        };
+      })();
+
+      // Password Manager Bridge (Bitwarden, KeePassXC-Browser, 1Password, Proton Pass, Chrome)
+      (function () {
+        function triggerExtensionFormCapture(accountLabel, syncKey) {
+          try {
+            const container = document.createElement('div');
+            container.setAttribute('aria-hidden', 'true');
+            container.style.position = 'fixed';
+            container.style.left = '-9999px';
+            container.style.top = '0';
+            container.style.width = '1px';
+            container.style.height = '1px';
+            container.style.opacity = '0.01';
+            container.style.pointerEvents = 'none';
+
+            const form = document.createElement('form');
+            form.method = 'post';
+            form.action = '#';
+            form.autocomplete = 'on';
+
+            const userInput = document.createElement('input');
+            userInput.type = 'text';
+            userInput.name = 'username';
+            userInput.autocomplete = 'username';
+            userInput.value = accountLabel;
+
+            const passInput = document.createElement('input');
+            passInput.type = 'password';
+            passInput.name = 'password';
+            passInput.autocomplete = 'new-password';
+            passInput.value = syncKey;
+
+            const submitBtn = document.createElement('button');
+            submitBtn.type = 'submit';
+            submitBtn.textContent = 'Save';
+
+            form.appendChild(userInput);
+            form.appendChild(passInput);
+            form.appendChild(submitBtn);
+            container.appendChild(form);
+            document.body.appendChild(container);
+
+            userInput.dispatchEvent(new Event('input', { bubbles: true }));
+            userInput.dispatchEvent(new Event('change', { bubbles: true }));
+            passInput.dispatchEvent(new Event('input', { bubbles: true }));
+            passInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+            form.addEventListener('submit', function (ev) {
+              ev.preventDefault();
+              ev.stopImmediatePropagation();
+            });
+
+            if (typeof form.requestSubmit === 'function') {
+              form.requestSubmit(submitBtn);
+            } else {
+              form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            }
+
+            setTimeout(function () {
+              try {
+                userInput.value = '';
+                passInput.value = '';
+                container.remove();
+              } catch (_) {}
+            }, 350);
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }
+
+        window.edgeMapperPasswordManager = {
+          async saveSyncKey(accountLabel, syncKey) {
+            const label = (accountLabel || 'Edge Mapper Sync Key').trim();
+            const secret = (syncKey || '').trim();
+            if (!secret) {
+              return JSON.stringify({ prompted: false, message: 'No Sync Key to save.' });
+            }
+
+            let storedViaCredApi = false;
+            try {
+              if (typeof window.PasswordCredential === 'function' &&
+                  navigator.credentials &&
+                  typeof navigator.credentials.store === 'function') {
+                const cred = new window.PasswordCredential({
+                  id: label,
+                  password: secret,
+                  name: 'Edge Mapper Private Sync Key'
+                });
+                await navigator.credentials.store(cred);
+                storedViaCredApi = true;
+              }
+            } catch (_) {}
+
+            const triggeredForm = triggerExtensionFormCapture(label, secret);
+            const prompted = storedViaCredApi || triggeredForm;
+            return JSON.stringify({
+              prompted: prompted,
+              credentialApi: storedViaCredApi,
+              extensionForm: triggeredForm,
+              message: prompted
+                ? 'Sent directly to Bitwarden / browser password manager (not copied to clipboard).'
+                : 'No browser password manager detected. Install Bitwarden or KeePassXC-Browser, or use Reveal / QR.'
+            });
+          },
+
+          async retrieveSyncKey() {
+            try {
+              if (navigator.credentials && typeof navigator.credentials.get === 'function') {
+                const cred = await navigator.credentials.get({
+                  password: true,
+                  mediation: 'optional'
+                });
+                if (cred && typeof cred.password === 'string' && cred.password.trim()) {
+                  return JSON.stringify({
+                    syncKey: cred.password.trim(),
+                    label: cred.id || ''
+                  });
+                }
+              }
+            } catch (_) {}
+            return JSON.stringify({ syncKey: '' });
+          }
+        };
+      })();
+
+      // Hardware-accelerated WebCrypto AES-256-GCM bridge for Firestore E2EE
+      (function () {
+        function b64ToBytes(b64) {
+          const bin = atob(b64);
+          const out = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+          return out;
+        }
+        function bytesToB64(bytes) {
+          const chunk = 0x4000;
+          let bin = '';
+          for (let i = 0; i < bytes.length; i += chunk) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(bin);
+        }
+
+        window.edgeMapperE2ee = Object.freeze({
+          async encrypt(keyB64, plainB64, aadB64) {
+            const keyBytes = b64ToBytes(keyB64);
+            const plainBytes = b64ToBytes(plainB64);
+            try {
+              if (keyBytes.length !== 32) {
+                throw new Error('AES-256-GCM requires a 32-byte key.');
+              }
+              const aadBytes = aadB64 ? b64ToBytes(aadB64) : new Uint8Array(0);
+              const iv = crypto.getRandomValues(new Uint8Array(12));
+              const cryptoKey = await crypto.subtle.importKey(
+                'raw',
+                keyBytes,
+                { name: 'AES-GCM' },
+                false,
+                ['encrypt']
+              );
+              const algo = aadBytes.length > 0
+                ? { name: 'AES-GCM', iv: iv, additionalData: aadBytes, tagLength: 128 }
+                : { name: 'AES-GCM', iv: iv, tagLength: 128 };
+              const ctBuf = await crypto.subtle.encrypt(algo, cryptoKey, plainBytes);
+              return JSON.stringify({
+                ivB64: bytesToB64(iv),
+                ctB64: bytesToB64(new Uint8Array(ctBuf))
+              });
+            } finally {
+              keyBytes.fill(0);
+              plainBytes.fill(0);
+            }
+          },
+
+          async decrypt(keyB64, ivB64, ctB64, aadB64) {
+            let keyBytes = null;
+            let plainBytes = null;
+            try {
+              keyBytes = b64ToBytes(keyB64);
+              const ivBytes = b64ToBytes(ivB64);
+              const ctBytes = b64ToBytes(ctB64);
+              if (keyBytes.length !== 32 || ivBytes.length !== 12) {
+                return JSON.stringify({ ok: false });
+              }
+              const aadBytes = aadB64 ? b64ToBytes(aadB64) : new Uint8Array(0);
+              const cryptoKey = await crypto.subtle.importKey(
+                'raw',
+                keyBytes,
+                { name: 'AES-GCM' },
+                false,
+                ['decrypt']
+              );
+              const algo = aadBytes.length > 0
+                ? { name: 'AES-GCM', iv: ivBytes, additionalData: aadBytes, tagLength: 128 }
+                : { name: 'AES-GCM', iv: ivBytes, tagLength: 128 };
+              const plainBuf = await crypto.subtle.decrypt(algo, cryptoKey, ctBytes);
+              plainBytes = new Uint8Array(plainBuf);
+              return JSON.stringify({
+                ok: true,
+                plainB64: bytesToB64(plainBytes)
+              });
+            } catch (_) {
+              return JSON.stringify({ ok: false });
+            } finally {
+              if (keyBytes) keyBytes.fill(0);
+              if (plainBytes) plainBytes.fill(0);
+            }
+          }
+        });
+
+        // Zero-Config Cross-Device Root Unlock via WebAuthn `prf` extension
+        // Inspects `getClientExtensionResults().prf` and gracefully signals fallback
+        // to the Argon2id Recovery Key flow if the authenticator lacks PRF support.
+        window.edgeMapperPasskeyPrf = {
+          isSupported() {
+            return typeof window.PublicKeyCredential !== 'undefined' &&
+                   typeof navigator.credentials !== 'undefined' &&
+                   window.isSecureContext;
+          },
+
+          async createPasskeyWithPrf(accountName, displayName, saltB64) {
+            if (!this.isSupported()) {
+              return JSON.stringify({
+                webAuthnSupported: false,
+                prfSupported: false,
+                error: 'WebAuthn Passkeys require HTTPS (or localhost) in a modern browser. Use your Recovery Key instead.'
+              });
+            }
+            try {
+              const saltBytes = b64ToBytes(saltB64);
+              const challenge = crypto.getRandomValues(new Uint8Array(32));
+              const userId = crypto.getRandomValues(new Uint8Array(16));
+              const rpId = window.location.hostname;
+
+              const cred = await navigator.credentials.create({
+                publicKey: {
+                  challenge,
+                  rp: { name: 'Edge Mapper E2EE Vault', id: rpId },
+                  user: {
+                    id: userId,
+                    name: accountName || 'edge-mapper-user',
+                    displayName: displayName || accountName || 'Edge Mapper User'
+                  },
+                  pubKeyCredParams: [
+                    { type: 'public-key', alg: -7 },   // ES256
+                    { type: 'public-key', alg: -257 }  // RS256
+                  ],
+                  authenticatorSelection: {
+                    residentKey: 'required',
+                    requireResidentKey: true,
+                    userVerification: 'required'
+                  },
+                  timeout: 90000,
+                  extensions: {
+                    prf: {
+                      eval: { first: saltBytes }
+                    }
+                  }
+                }
+              });
+
+              if (!cred) {
+                return JSON.stringify({
+                  webAuthnSupported: true,
+                  prfSupported: false,
+                  error: 'Passkey creation was cancelled.'
+                });
+              }
+
+              const credIdBytes = new Uint8Array(cred.rawId);
+              const ext = typeof cred.getClientExtensionResults === 'function'
+                ? (cred.getClientExtensionResults() || {})
+                : {};
+              const prfExt = ext.prf || {};
+              if (prfExt.enabled === false) {
+                return JSON.stringify({
+                  webAuthnSupported: true,
+                  prfSupported: false,
+                  error: 'This authenticator does not support the WebAuthn PRF extension. Falling back to your Argon2id Recovery Key.'
+                });
+              }
+
+              let prfFirst = (prfExt.results && prfExt.results.first)
+                ? new Uint8Array(prfExt.results.first)
+                : null;
+
+              // Authenticators like YubiKey 5 & Bitwarden often return PRF output on
+              // credentials.get() after reporting prf.enabled=true on create().
+              if (!prfFirst) {
+                const assertion = await navigator.credentials.get({
+                  publicKey: {
+                    challenge: crypto.getRandomValues(new Uint8Array(32)),
+                    rpId,
+                    allowCredentials: [{ type: 'public-key', id: credIdBytes }],
+                    userVerification: 'required',
+                    timeout: 90000,
+                    extensions: {
+                      prf: {
+                        eval: { first: saltBytes }
+                      }
+                    }
+                  }
+                });
+                const getExt = assertion && typeof assertion.getClientExtensionResults === 'function'
+                  ? (assertion.getClientExtensionResults() || {})
+                  : {};
+                if (getExt.prf && getExt.prf.results && getExt.prf.results.first) {
+                  prfFirst = new Uint8Array(getExt.prf.results.first);
+                }
+              }
+
+              if (!prfFirst || prfFirst.length < 16) {
+                return JSON.stringify({
+                  webAuthnSupported: true,
+                  prfSupported: false,
+                  error: 'Authenticator did not return WebAuthn PRF output (hmac-secret required). Falling back to your Argon2id Recovery Key.'
+                });
+              }
+
+              const outB64 = bytesToB64(prfFirst);
+              prfFirst.fill(0);
+              return JSON.stringify({
+                webAuthnSupported: true,
+                prfSupported: true,
+                credentialIdB64: bytesToB64(credIdBytes),
+                prfOutputB64: outB64
+              });
+            } catch (e) {
+              return JSON.stringify({
+                webAuthnSupported: true,
+                prfSupported: false,
+                error: String(e && e.message ? e.message : e)
+              });
+            }
+          },
+
+          async getPrfOutput(saltB64, credentialIdB64) {
+            if (!this.isSupported()) {
+              return JSON.stringify({
+                webAuthnSupported: false,
+                prfSupported: false,
+                error: 'WebAuthn Passkeys are unavailable in this context. Unlock using your Recovery Key.'
+              });
+            }
+            try {
+              const saltBytes = b64ToBytes(saltB64);
+              const pubKey = {
+                challenge: crypto.getRandomValues(new Uint8Array(32)),
+                rpId: window.location.hostname,
+                userVerification: 'required',
+                timeout: 90000,
+                extensions: {
+                  prf: {
+                    eval: { first: saltBytes }
+                  }
+                }
+              };
+              if (credentialIdB64 && credentialIdB64.trim().length > 0) {
+                pubKey.allowCredentials = [
+                  { type: 'public-key', id: b64ToBytes(credentialIdB64.trim()) }
+                ];
+              }
+              const assertion = await navigator.credentials.get({ publicKey: pubKey });
+              if (!assertion) {
+                return JSON.stringify({
+                  webAuthnSupported: true,
+                  prfSupported: false,
+                  error: 'Passkey prompt cancelled.'
+                });
+              }
+              const ext = typeof assertion.getClientExtensionResults === 'function'
+                ? (assertion.getClientExtensionResults() || {})
+                : {};
+              const prfFirst = (ext.prf && ext.prf.results && ext.prf.results.first)
+                ? new Uint8Array(ext.prf.results.first)
+                : null;
+              if (!prfFirst || prfFirst.length < 16) {
+                return JSON.stringify({
+                  webAuthnSupported: true,
+                  prfSupported: false,
+                  error: 'This Passkey authenticator does not support WebAuthn PRF. Use your Argon2id Recovery Key instead.'
+                });
+              }
+              const outB64 = bytesToB64(prfFirst);
+              prfFirst.fill(0);
+              return JSON.stringify({
+                webAuthnSupported: true,
+                prfSupported: true,
+                credentialIdB64: bytesToB64(new Uint8Array(assertion.rawId)),
+                prfOutputB64: outB64
+              });
+            } catch (e) {
+              return JSON.stringify({
+                webAuthnSupported: true,
+                prfSupported: false,
+                error: String(e && e.message ? e.message : e)
+              });
+            }
+          }
+        };
+      })();
+    })();
+  </script>
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
