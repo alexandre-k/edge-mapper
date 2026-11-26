@@ -54,12 +54,10 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "${{ runner.temp }}/release.p12"
-          cat <<EOF > android/key.properties
-          storeFile=${{ runner.temp }}/release.p12
-          storePassword=$KEYSTORE_PASSWORD
-          keyAlias=$KEY_ALIAS
-          keyPassword=$KEYSTORE_PASSWORD
-          EOF
+          printf 'storeFile=%s/release.p12\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "${{ runner.temp }}" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEYSTORE_PASSWORD" > android/key.properties
+          test -s android/key.properties
+          test -s "${{ runner.temp }}/release.p12"
 
       - name: Build Android APK & App Bundle
         run: |
