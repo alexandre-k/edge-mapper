@@ -30,9 +30,8 @@ Future<void> main() async {
     try {
       await AttestGateAppCheck.initialize(
         attestGateBaseUrl: AppEnvConfig.attestGateBaseUrl,
-        webRecaptchaSiteKey: AppEnvConfig.firebaseWebRecaptchaSiteKey,
-        webDebugToken: AppEnvConfig.firebaseWebAppCheckDebugToken,
-);
+        // webRecaptchaSiteKey: AppEnvConfig.firebaseWebRecaptchaSiteKey,
+        // webDebugToken: AppEnvConfig.firebaseWebAppCheckDebugToken
       );
     } catch (e) {
       debugPrint('[EdgeMapper] AttestGate App Check init skipped: $e');

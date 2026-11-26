@@ -49,12 +49,12 @@ class CaptureScreen extends StatefulWidget {
 
 class _CaptureScreenState extends State<CaptureScreen> {
   final ImagePicker _picker = ImagePicker();
-  final TextEditingController _noteController = TextEditingController();
+  // final TextEditingController _noteController = TextEditingController();
   final Uuid _uuid = const Uuid();
   late final OsmDuplicateService _nearbyOsmService =
       widget.nearbyOsmService ?? OsmDuplicateService();
 
-  bool _showHintInput = false;
+  // bool _showHintInput = false;
   bool _isAnalyzing = false;
   bool _isRunningDraftAi = false;
   String _analysisStep = '';
@@ -86,7 +86,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
   void dispose() {
     widget.sensors.removeListener(_maybeAutoScanNearbyOsm);
     widget.connectivity.removeListener(_maybeAutoScanNearbyOsm);
-    _noteController.dispose();
+    // _noteController.dispose();
     super.dispose();
   }
 
@@ -451,9 +451,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
         longitude: lon,
         headingDegrees: heading,
         altitudeMeters: altitude,
-        userHint: _noteController.text.trim().isNotEmpty
-            ? _noteController.text.trim()
-            : existingDraft?.notes,
+        // userHint: _noteController.text.trim().isNotEmpty
+        //     ? _noteController.text.trim()
+        //     : existingDraft?.notes,
         isOnTrail: (existingDraft?.trailId ?? activeTrail?.id) != null,
         forceCloud: _skipLocalNano,
         shouldCancel: () => _cancelAnalysis,
@@ -602,9 +602,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
   void _dismissActiveCapture() {
     setState(() {
       _pendingDraft = null;
-      _showHintInput = false;
+      // _showHintInput = false;
       _diagnosticNote = null;
-      _noteController.clear();
+      // _noteController.clear();
     });
   }
 
@@ -814,139 +814,140 @@ class _CaptureScreenState extends State<CaptureScreen> {
                     );
                   },
                 ),
-                const SizedBox(height: AppSpacing.sm),
+                if (!isCompact) ...[
+                  const SizedBox(height: AppSpacing.sm),
 
-                // Capture Controls (tablet/desktop) & Optional AI Hint
-                SurfacePanel(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: AppSpacing.md,
-                    vertical: isCompact ? AppSpacing.xs : AppSpacing.md,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (!isCompact) ...[
-                        FilledButton.icon(
-                          onPressed: _isAnalyzing
-                              ? null
-                              : () => _captureAndAnalyze(
-                                    source: kIsWeb
-                                        ? ImageSource.gallery
-                                        : ImageSource.camera,
-                                  ),
-                          style: FilledButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 48),
-                          ),
-                          icon: _isAnalyzing
-                              ? SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: scheme.onPrimary,
-                                  ),
-                                )
-                              : const Icon(
-                                  kIsWeb
-                                      ? Icons.add_photo_alternate_outlined
-                                      : Icons.camera_alt_outlined,
-                                  size: 20,
-                                ),
-                          label: Text(
-                            _isAnalyzing
-                                ? 'Analyzing...'
-                                : (kIsWeb ? 'Choose Photo' : 'Take Photo'),
-                          ),
-                        ),
-                        const SizedBox(height: AppSpacing.xs),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                onPressed: _isAnalyzing
-                                    ? null
-                                    : () => _captureAndAnalyze(
-                                          source: ImageSource.gallery,
-                                          pickMultipleFromGallery: true,
-                                        ),
-                                icon: const Icon(
-                                  Icons.collections_outlined,
-                                  size: 18,
-                                ),
-                                label: const Text('Multi-Photo'),
-                              ),
-                            ),
-                            const SizedBox(width: AppSpacing.xs),
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                onPressed: _isAnalyzing
-                                    ? null
-                                    : () => _captureAndAnalyze(source: null),
-                                icon: const Icon(
-                                  Icons.push_pin_outlined,
-                                  size: 18,
-                                ),
-                                label: const Text('Quick Pin'),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: AppSpacing.xs),
-                      ],
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: TextButton.icon(
-                          onPressed: () =>
-                              setState(() => _showHintInput = !_showHintInput),
-                          style: TextButton.styleFrom(
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                          ),
-                          icon: Icon(
-                            _showHintInput || _noteController.text.isNotEmpty
-                                ? Icons.edit_note_rounded
-                                : Icons.add_comment_outlined,
-                            size: 16,
-                          ),
-                          label: Text(
-                            _noteController.text.trim().isNotEmpty
-                                ? 'Hint set'
-                                : (_showHintInput ? 'Hide hint' : 'Add hint'),
-                          ),
-                        ),
-                      ),
-                      if (_showHintInput ||
-                          _noteController.text.trim().isNotEmpty) ...[
-                        const SizedBox(height: AppSpacing.xs),
-                        TextField(
-                          controller: _noteController,
-                          textInputAction: TextInputAction.done,
-                          onChanged: (_) => setState(() {}),
-                          decoration: InputDecoration(
-                            hintText: 'Optional place name or AI hint...',
-                            prefixIcon:
-                                const Icon(Icons.edit_note_rounded, size: 20),
-                            suffixIcon: _noteController.text.isNotEmpty
-                                ? IconButton(
-                                    tooltip: 'Clear hint',
-                                    icon: const Icon(
-                                      Icons.close_rounded,
-                                      size: 18,
+                  // Capture Controls (tablet/desktop) & Optional AI Hint
+                  SurfacePanel(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: AppSpacing.md,
+                      vertical: isCompact ? AppSpacing.xs : AppSpacing.md,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (!isCompact) ...[
+                          FilledButton.icon(
+                            onPressed: _isAnalyzing
+                                ? null
+                                : () => _captureAndAnalyze(
+                                      source: kIsWeb
+                                          ? ImageSource.gallery
+                                          : ImageSource.camera,
                                     ),
-                                    onPressed: () {
-                                      _noteController.clear();
-                                      setState(() {});
-                                    },
+                            style: FilledButton.styleFrom(
+                              minimumSize: const Size(double.infinity, 48),
+                            ),
+                            icon: _isAnalyzing
+                                ? SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: scheme.onPrimary,
+                                    ),
                                   )
-                                : null,
-                            isDense: true,
+                                : const Icon(
+                                    kIsWeb
+                                        ? Icons.add_photo_alternate_outlined
+                                        : Icons.camera_alt_outlined,
+                                    size: 20,
+                                  ),
+                            label: Text(
+                              _isAnalyzing
+                                  ? 'Analyzing...'
+                                  : (kIsWeb ? 'Choose Photo' : 'Take Photo'),
+                            ),
                           ),
-                        ),
+                          const SizedBox(height: AppSpacing.xs),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: _isAnalyzing
+                                      ? null
+                                      : () => _captureAndAnalyze(
+                                            source: ImageSource.gallery,
+                                            pickMultipleFromGallery: true,
+                                          ),
+                                  icon: const Icon(
+                                    Icons.collections_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Multi-Photo'),
+                                ),
+                              ),
+                              // const SizedBox(width: AppSpacing.xs),
+                              // Expanded(
+                              //   child: OutlinedButton.icon(
+                              //     onPressed: _isAnalyzing
+                              //         ? null
+                              //         : () => _captureAndAnalyze(source: null),
+                              //     icon: const Icon(
+                              //       Icons.push_pin_outlined,
+                              //       size: 18,
+                              //     ),
+                              //     label: const Text('Quick Pin'),
+                              //   ),
+                              // ),
+                            ],
+                          ),
+                          // const SizedBox(height: AppSpacing.xs),
+                        ],
+                        // Align(
+                        //   alignment: Alignment.centerRight,
+                        //   child: TextButton.icon(
+                        //     onPressed: () =>
+                        //         setState(() => _showHintInput = !_showHintInput),
+                        //     style: TextButton.styleFrom(
+                        //       visualDensity: VisualDensity.compact,
+                        //       padding: const EdgeInsets.symmetric(horizontal: 8),
+                        //     ),
+                        //     icon: Icon(
+                        //       _showHintInput || _noteController.text.isNotEmpty
+                        //           ? Icons.edit_note_rounded
+                        //           : Icons.add_comment_outlined,
+                        //       size: 16,
+                        //     ),
+                        //     label: Text(
+                        //       _noteController.text.trim().isNotEmpty
+                        //           ? 'Hint set'
+                        //           : (_showHintInput ? 'Hide hint' : 'Add hint'),
+                        //     ),
+                        //   ),
+                        // ),
+                        // if (_showHintInput ||
+                        //     _noteController.text.trim().isNotEmpty) ...[
+                        //   const SizedBox(height: AppSpacing.xs),
+                        //   TextField(
+                        //     controller: _noteController,
+                        //     textInputAction: TextInputAction.done,
+                        //     onChanged: (_) => setState(() {}),
+                        //     decoration: InputDecoration(
+                        //       hintText: 'Optional place name or AI hint...',
+                        //       prefixIcon:
+                        //           const Icon(Icons.edit_note_rounded, size: 20),
+                        //       suffixIcon: _noteController.text.isNotEmpty
+                        //           ? IconButton(
+                        //               tooltip: 'Clear hint',
+                        //               icon: const Icon(
+                        //                 Icons.close_rounded,
+                        //                 size: 18,
+                        //               ),
+                        //               onPressed: () {
+                        //                 _noteController.clear();
+                        //                 setState(() {});
+                        //               },
+                        //             )
+                        //           : null,
+                        //       isDense: true,
+                        //     ),
+                        //   ),
+                        // ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-
+                ],
                 if (!isSplitLayout) ...[
                   if (_isAnalyzing) ...[
                     const SizedBox(height: AppSpacing.sm),
