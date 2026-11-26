@@ -67,10 +67,6 @@ jobs:
         if: always()
         run: rm -f "${{ runner.temp }}/release.p12" android/key.properties
 
-      - name: Clean up keystore
-        if: always()
-        run: rm -f "${{ runner.temp }}/release.p12"
-
       # --- WEB BUILD ---
       - name: Build Web Bundle
         run: flutter build web --release --dart-define-from-file=.env
