@@ -32,11 +32,6 @@ jobs:
         run: flutter pub get
 
       # --- ANDROID BUILD ---
-      - name: Decode PKCS12 Keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "${{ runner.temp }}/release.p12"
-
       - name: Decode Firebase Configuration
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
@@ -51,6 +46,29 @@ jobs:
         env:
           ENV_FILE: ${{ secrets.ENV_FILE }}
         run: printf '%s' "$ENV_FILE" | base64 --decode > .env
+
+      - name: Decode PKCS12 Keystore & Create key.properties
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "${{ runner.temp }}/release.p12"
+          cat <<EOF > android/key.properties
+          storeFile=${{ runner.temp }}/release.p12
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEYSTORE_PASSWORD
+          EOF
+
+      - name: Build Android APK & App Bundle
+        run: |
+          flutter build apk --release --dart-define-from-file=.env
+          flutter build appbundle --release --dart-define-from-file=.env
+
+      - name: Clean up signing files
+        if: always()
+        run: rm -f "${{ runner.temp }}/release.p12" android/key.properties
 
       - name: Build Android APK & App Bundle
         env:
