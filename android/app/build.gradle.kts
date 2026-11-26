@@ -76,6 +76,10 @@ android {
         }
         release {
             // Use android/key.properties when present; fall back to debug keys so zero-config builds still work.
+            val isCi = System.getenv("CI") == "true"
+            require(!isCi || hasKeystoreProperties) {
+                "android/key.properties is required for CI release builds"
+            }
             signingConfig = if (hasKeystoreProperties) {
                 signingConfigs.getByName("release")
             } else {
