@@ -47,6 +47,11 @@ jobs:
             printf '%s' "$FIREBASE_OPTIONS_DART" | base64 --decode > lib/firebase_options.dart
           fi
 
+      - name: Decode .env file
+        env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: printf '%s' "$ENV_FILE" | base64 --decode > .env
+
       - name: Build Android APK & App Bundle
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/release.p12
@@ -54,8 +59,8 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          flutter build apk --release
-          flutter build appbundle --release
+          flutter build apk --release --dart-define-from-file=.env
+          flutter build appbundle --release --dart-define-from-file=.env
 
       - name: Clean up keystore
         if: always()
@@ -63,7 +68,7 @@ jobs:
 
       # --- WEB BUILD ---
       - name: Build Web Bundle
-        run: flutter build web --release
+        run: flutter build web --release --dart-define-from-file=.env
 
       - name: Archive Web Build
         run: tar -czvf build/web-release.tar.gz -C build/web .
