@@ -69,7 +69,9 @@ jobs:
 
       # --- WEB BUILD ---
       - name: Build Web Bundle
-        run: flutter build web --release --dart-define-from-file=.env
+        run: |
+          flutter build web --release --dart-define-from-file=.env
+          firebase deploy --only hosting
 
       - name: Archive Web Build
         run: tar -czvf build/web-release.tar.gz -C build/web .

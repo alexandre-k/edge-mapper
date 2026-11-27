@@ -149,7 +149,7 @@ class AttestGateAppCheck {
         return;
       }
       await FirebaseAppCheck.instance.activate(
-        providerWeb: ReCaptchaV3Provider(siteKey),
+        providerWeb: ReCaptchaEnterpriseProvider(siteKey),
       );
       _isInitialized = true;
       return;
