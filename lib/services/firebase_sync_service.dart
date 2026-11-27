@@ -187,6 +187,12 @@ class FirebaseSyncService extends ChangeNotifier {
   bool _unlockedViaHardwareCache = false;
   bool _hasAndroidHardwareCache = false;
   bool _explicitlyLocked = false;
+  // Lightweight REST Auth session for Android (avoids native firebase-auth reCAPTCHA SDK)
+  String? _restUid;
+  String? _restEmail;
+  String? _restIdToken;
+  String? _restRefreshToken;
+  DateTime? _restTokenExpiry;
   static final RegExp _safeSegmentPattern = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
   E2eePlatformCapabilities _capabilities = const E2eePlatformCapabilities(
     supportsWebAuthnPrf: false,
@@ -221,7 +227,7 @@ class FirebaseSyncService extends ChangeNotifier {
   }
 
   void _attachAuthListener() {
-    if (_uidOverride != null) return;
+    if (_uidOverride != null || !kIsWeb) return;
     if (!FirebaseBootstrap.isConfigured || Firebase.apps.isEmpty) return;
     try {
       _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
@@ -257,6 +263,7 @@ class FirebaseSyncService extends ChangeNotifier {
       final uid = _uidOverride.call()?.trim();
       return (uid != null && uid.isNotEmpty) ? uid : null;
     }
+    if (!kIsWeb) return _restUid;
     return _currentFirebaseUser?.uid;
   }
 
@@ -482,6 +489,14 @@ class FirebaseSyncService extends ChangeNotifier {
       await _vaultAuthOverride.call(creds, createNew: createNew);
       return;
     }
+
+    // Android: use Identity Toolkit REST API directly (bypasses native Android reCAPTCHA SDK)
+    if (!kIsWeb) {
+      await _authenticateViaRest(creds, createNew: createNew);
+      return;
+    }
+
+    // Web: keep standard FirebaseAuth SDK (uses reCAPTCHA web provider)
     try {
       if (createNew) {
         try {
@@ -519,6 +534,90 @@ class FirebaseSyncService extends ChangeNotifier {
     } on FirebaseAuthException catch (e) {
       throw Exception(_friendlyAuthError(e));
     }
+  }
+
+  Future<void> _authenticateViaRest(
+    DerivedVaultAuthCredentials creds, {
+    required bool createNew,
+  }) async {
+    final apiKey = Firebase.app().options.apiKey;
+
+    Future<http.Response> postAuth(String endpoint) async {
+      final uri = Uri.https(
+        'identitytoolkit.googleapis.com',
+        '/v1/accounts:$endpoint',
+        {'key': apiKey},
+      );
+      final appCheck = await AttestGateAppCheck.getHeaderToken();
+      return _client
+          .post(
+            uri,
+            headers: {
+              'Content-Type': 'application/json',
+              if (appCheck != null && appCheck.isNotEmpty)
+                'X-Firebase-AppCheck': appCheck,
+            },
+            body: jsonEncode({
+              'email': creds.internalHandle,
+              'password': creds.internalSecret,
+              'returnSecureToken': true,
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+    }
+
+    var resp = await postAuth(createNew ? 'signUp' : 'signInWithPassword');
+    if (resp.statusCode >= 400) {
+      final errMsg = _compactError(resp.body).toUpperCase();
+      if (createNew && errMsg.contains('EMAIL_EXISTS')) {
+        resp = await postAuth('signInWithPassword');
+      } else if (!createNew &&
+          (errMsg.contains('EMAIL_NOT_FOUND') ||
+              errMsg.contains('INVALID_LOGIN_CREDENTIALS'))) {
+        resp = await postAuth('signUp');
+      }
+    }
+
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw Exception('Firebase Auth REST error: ${_compactError(resp.body)}');
+    }
+
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    _restUid = data['localId']?.toString();
+    _restEmail = creds.internalHandle;
+    _restIdToken = data['idToken']?.toString();
+    _restRefreshToken = data['refreshToken']?.toString();
+    final expiresIn = int.tryParse(data['expiresIn']?.toString() ?? '') ?? 3600;
+    _restTokenExpiry = DateTime.now().add(Duration(seconds: expiresIn - 60));
+  }
+
+  Future<String?> _getRestIdToken({bool forceRefresh = false}) async {
+    if (_restIdToken != null &&
+        !forceRefresh &&
+        _restTokenExpiry != null &&
+        DateTime.now().isBefore(_restTokenExpiry!)) {
+      return _restIdToken;
+    }
+    final refresh = _restRefreshToken;
+    if (refresh == null || refresh.isEmpty) return _restIdToken;
+
+    final apiKey = Firebase.app().options.apiKey;
+    final uri = Uri.https('securetoken.googleapis.com', '/v1/token', {'key': apiKey});
+    final resp = await _client
+        .post(
+          uri,
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'grant_type=refresh_token&refresh_token=${Uri.encodeQueryComponent(refresh)}',
+        )
+        .timeout(const Duration(seconds: 15));
+    if (resp.statusCode >= 200 && resp.statusCode < 300) {
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      _restIdToken = data['id_token']?.toString();
+      _restRefreshToken = data['refresh_token']?.toString() ?? refresh;
+      final expiresIn = int.tryParse(data['expires_in']?.toString() ?? '') ?? 3600;
+      _restTokenExpiry = DateTime.now().add(Duration(seconds: expiresIn - 60));
+    }
+    return _restIdToken;
   }
 
   /// 1-Tap Zero-Config Vault Creation with WebAuthn Passkey (`prf`):
@@ -688,7 +787,8 @@ class FirebaseSyncService extends ChangeNotifier {
       authSeed = E2eeEnvelopeCrypto.deriveAuthSeedFromPrf(prfOutput);
       final authCreds =
           E2eeEnvelopeCrypto.deriveVaultAuthCredentials(authSeed);
-      final currentEmail = _currentFirebaseUser?.email?.toLowerCase();
+      final currentEmail =
+          (kIsWeb ? _currentFirebaseUser?.email : _restEmail)?.toLowerCase();
       if (!isSignedIn ||
           (currentEmail != null &&
               currentEmail != authCreds.internalHandle.toLowerCase())) {
@@ -889,7 +989,8 @@ class FirebaseSyncService extends ChangeNotifier {
     }
     final parsed = E2eeEnvelopeCrypto.parseRecoveryKey(recoveryKey);
     try {
-      final currentEmail = _currentFirebaseUser?.email?.toLowerCase();
+      final currentEmail =
+          (kIsWeb ? _currentFirebaseUser?.email : _restEmail)?.toLowerCase();
       if (!isSignedIn ||
           (currentEmail != null &&
               currentEmail != parsed.authCredentials.internalHandle.toLowerCase())) {
@@ -1117,20 +1218,27 @@ class FirebaseSyncService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Signs out of Firebase Auth, zeroizes all volatile keys in RAM, and clears
+/// Signs out of Firebase Auth, zeroizes all volatile keys in RAM, and clears
   /// the Android Keystore hardware cache when [clearHardwareCache] is true.
   Future<void> signOutAndLock({bool clearHardwareCache = true}) async {
     final uid = currentUid;
     _clearVolatileKeyPair();
     _remoteKeyring = null;
     _remoteKeyringChecked = false;
+    _restUid = null;
+    _restEmail = null;
+    _restIdToken = null;
+    _restRefreshToken = null;
+    _restTokenExpiry = null;
     if (clearHardwareCache) {
       await _platformBridge.clearCachedUserPriv(uid: uid);
       _hasAndroidHardwareCache = false;
     }
     if (_authSignOutOverride != null) {
       await _authSignOutOverride.call();
-    } else if (FirebaseBootstrap.isConfigured && Firebase.apps.isNotEmpty) {
+    } else if (kIsWeb &&
+        FirebaseBootstrap.isConfigured &&
+        Firebase.apps.isNotEmpty) {
       await FirebaseAuth.instance.signOut();
     }
     notifyListeners();
@@ -2232,11 +2340,18 @@ class FirebaseSyncService extends ChangeNotifier {
       }
 
       try {
-        final user = _currentFirebaseUser;
-        if (user != null) {
-          final token = await user.getIdToken(forceRefreshAuth);
+        if (!kIsWeb) {
+          final token = await _getRestIdToken(forceRefresh: forceRefreshAuth);
           if (token != null && token.isNotEmpty) {
             headers['Authorization'] = 'Bearer $token';
+          }
+        } else {
+          final user = _currentFirebaseUser;
+          if (user != null) {
+            final token = await user.getIdToken(forceRefreshAuth);
+            if (token != null && token.isNotEmpty) {
+              headers['Authorization'] = 'Bearer $token';
+            }
           }
         }
       } catch (e) {
