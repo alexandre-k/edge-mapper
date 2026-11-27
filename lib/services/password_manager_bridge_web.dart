@@ -43,7 +43,7 @@ Future<PasswordManagerSaveResult> saveSyncKeyImpl({
 
   final message = detail ??
       (prompted
-          ? 'Sent directly to Bitwarden / browser password manager.'
+          ? 'Sent directly to your password manager.'
           : 'No browser password manager detected. Install Bitwarden or KeePassXC-Browser, or use Reveal / QR.');
 
   return PasswordManagerSaveResult(

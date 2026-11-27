@@ -210,7 +210,7 @@ class _FirebaseAuthSheetState extends State<FirebaseAuthSheet> {
     final key = _linkKeyCtrl.text.trim();
     if (key.isEmpty) {
       _setStatus(
-        'Paste the Sync Key from your other device or autofill from Bitwarden.',
+        'Paste the Sync Key from your other device or autofill from your password manager.',
         isError: true,
       );
       return;
@@ -266,9 +266,9 @@ class _FirebaseAuthSheetState extends State<FirebaseAuthSheet> {
     if (!mounted) return;
     if (saved != null && saved.isNotEmpty) {
       setState(() => _linkKeyCtrl.text = saved);
-      _setStatus('Filled key from Bitwarden / password manager.');
+      _setStatus('Filled key from your password manager.');
     } else {
-      _setStatus('Tap the key box for Bitwarden autofill, or paste your key.');
+      _setStatus('Tap the key box for autofill, or paste your key.');
     }
   }
 
@@ -551,7 +551,7 @@ class _FirebaseAuthSheetState extends State<FirebaseAuthSheet> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            'Paste the Sync Key from your other device (or autofill from Bitwarden).',
+                            'Paste the Sync Key from your other device (or autofill from your password manager).',
                             style: textTheme.bodySmall,
                           ),
                           const SizedBox(height: AppSpacing.sm),
@@ -598,7 +598,7 @@ class _FirebaseAuthSheetState extends State<FirebaseAuthSheet> {
                                         minWidth: 34,
                                         minHeight: 34,
                                       ),
-                                      tooltip: 'Autofill from Bitwarden',
+                                      tooltip: 'Autofill from your password manager',
                                       onPressed: _busy
                                           ? null
                                           : _fillFromPasswordManager,
@@ -822,7 +822,7 @@ class _FirebaseAuthSheetState extends State<FirebaseAuthSheet> {
                                   Icons.shield_outlined,
                                   size: 15,
                                 ),
-                                label: const Text('Backup to Bitwarden'),
+                                label: const Text('Backup to your password manager'),
                               ),
                               if (supportsPrf && !fb.hasPrfSlot)
                                 TextButton.icon(

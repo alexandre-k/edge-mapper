@@ -41,10 +41,10 @@ Future<PasswordManagerSaveResult> saveSyncKeyImpl({
 
   final message = detail ??
       (saved
-          ? 'Saved directly to Bitwarden / Android Credential Manager.'
+          ? 'Saved directly to your password manager / Android Credential Manager.'
           : prompted
-              ? 'Sent directly to your password manager (Bitwarden / Autofill).'
-              : 'Enable Bitwarden (or your password manager) in Android Settings → Passwords, passkeys & accounts to save directly.');
+              ? 'Sent directly to your password manager (Password Manager / Autofill).'
+              : 'Enable your password manager in Android Settings → Passwords, passkeys & accounts to save directly.');
 
   return PasswordManagerSaveResult(
     promptedPasswordManager: prompted,
