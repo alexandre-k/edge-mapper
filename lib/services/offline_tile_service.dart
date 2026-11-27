@@ -38,15 +38,22 @@ enum MapTileStyle {
     final sub = const ['a', 'b', 'c'][(coord.x + coord.y).abs() % 3];
     return switch (this) {
       MapTileStyle.osmStreets => [
+          if (!kIsWeb)
+            Uri.parse(
+              'https://tile.openstreetmap.org/'
+              '${coord.z}/${coord.x}/${coord.y}.png',
+            ),
+          // 1. OpenStreetMap France (full UTF-8 / CJK glyphs, allows Web referers, no API key)
           Uri.parse(
-            'https://tile.openstreetmap.org/'
+            'https://$sub.tile.openstreetmap.fr/osmfr/'
             '${coord.z}/${coord.x}/${coord.y}.png',
           ),
+          // 2. Esri World Street Map (global CJK support, allows Web CORS/referers, no API key)
           Uri.parse(
-            'https://$sub.basemaps.cartocdn.com/rastertiles/voyager/'
-            '${coord.z}/${coord.x}/${coord.y}.png',
+            'https://server.arcgisonline.com/ArcGIS/rest/services/'
+            'World_Street_Map/MapServer/tile/${coord.z}/${coord.y}/${coord.x}',
           ),
-        ],
+      ],
       MapTileStyle.topo => [
           Uri.parse(
             'https://$sub.tile.opentopomap.org/'

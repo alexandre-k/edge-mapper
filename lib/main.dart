@@ -30,7 +30,7 @@ Future<void> main() async {
     try {
       await AttestGateAppCheck.initialize(
         attestGateBaseUrl: AppEnvConfig.attestGateBaseUrl,
-        // webRecaptchaSiteKey: AppEnvConfig.firebaseWebRecaptchaSiteKey,
+        webRecaptchaSiteKey: AppEnvConfig.firebaseWebRecaptchaSiteKey,
         // webDebugToken: AppEnvConfig.firebaseWebAppCheckDebugToken
       );
     } catch (e) {
